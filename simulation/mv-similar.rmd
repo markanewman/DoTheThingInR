@@ -1,0 +1,6 @@
+---
+title: "Similarities in Multivariate Data Sets"
+author: "Mark Newman"
+date: "2022-02-13"
+---
+
