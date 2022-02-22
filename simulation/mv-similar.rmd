@@ -2,5 +2,300 @@
 title: "Similarities in Multivariate Data Sets"
 author: "Mark Newman"
 date: "2022-02-13"
+editor_options: 
+  chunk_output_type: console
 ---
+
+# Intro
+
+Sometimes you need to generate synthetic data.
+There is nothing wrong with this.
+There are a lot of academic papers that are built on this premise.
+The issue is that when this is done, several quasi-experiment objections can be raised.
+The most important of which is: 
+
+> How do you know the synthetic data is _close enough_ to the real data to draw any valid inference.
+
+This walk-through seeks to provide examples as to why this is important, somethings that work, and mode importantly things to **NOT DO**.
+
+```{r message = F}
+library(ICSNP)
+library(mvnormtest)
+library(biotools)
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(knitr)
+library(kableExtra)
+```
+
+# Data Set
+
+Lets examine a univariate data set first to explain what we mean by similar synthetic data.
+
+Below is two days of **REAL** data.
+The data was collected using a [HOBO MX2202](https://www.amazon.com/gp/product/B075X2SWKN) temperature and light data logger (Logger 1) and a [HOBO MX2201](https://www.amazon.com/gp/product/B075X1MPRW) temperature logger (Logger 2).
+The data loggers were placed approximately four inched apart on top of a glass mason jar in an indoor facility for the purposes of product evaluation.
+
+```{r}
+data <- read.csv('mv-similar.csv')
+data <-
+  data %>%
+  mutate(Date.Time = mdy_hm(Date.Time))
+head(data) %>%
+  kable(
+    caption = 'Evaluation Data',
+    col.names = c('Date', 'Temperature', 'Light', 'Temperature')) %>%
+  kable_styling() %>%
+  add_header_above(header = c(' ' = 1, 'MX2202' = 2, 'MX2201' = 1))
+```
+
+Looking at the data, we see that the two `Logger`s are reasonably close when comparing along `Temperature`.
+
+```{r}
+data <-
+  data %>%
+  select(Date.Time, Temperature.1, Temperature.2) %>%
+  pivot_longer(cols = starts_with('Temperature'), names_to = 'Logger', values_to = 'Temperature') %>%
+  separate(Logger, into = c(NA, 'Logger')) %>%
+  mutate(Logger = factor(Logger, levels = 1:2))
+
+ggplot(data, aes(x = Date.Time, y = Temperature, color = Logger)) + 
+  theme_bw() + 
+  geom_line()
+```
+
+Now, there are differences.
+For our purposes, the question is going to be, are there too many differences.
+
+# Analysis
+
+The original question of _close enough_ here is straight forward.
+The two loggers were inches apart and the curves look almost identical.
+The problem is that looking at something is not a **_test_**.
+We need a statistical test to help us determine whether or not there is a significant difference between the two distributions.
+This is especially the case where:
+
+1. Hundreds of curves need to be examined
+2. The data is multivariate
+
+The first thing that comes to mind is a `t.test()`.
+Lets see how that works.
+
+```{r}
+t.test(Temperature ~ Logger, data = data)
+```
+
+We see is that the p-value is 0.3176, which is > 0.05, so we fail to reject $H_0$ and say there is no difference in group means.
+
+There are two issues here:
+
+1. We are testing for equal distributions, not group means
+2. We have multivariate data
+
+On the first issue, we may consider this a moot point because our final experiment may be concerned with group means (these data loggers were bought for that purpose).
+If this is the case, we may be tempted to just proceed forward.
+While not appropriate, it _might_ not impact the overall intent of the experiment.
+We _will_ revisit this point later.
+However, extreme caution must be had because of point 2.
+
+When we look at our previous graph we were directly using `Date.Time`.
+This might not be obvious at first, but this meant we were explicitly moving our data from univariate to mulitvatiate.
+We promptly failed to incorporate this change into our test.
+
+This becomes painfully obvious when we reorder `Temperature` while keeping `Date.Time` in place.
+
+```{r results = 'hold'}
+t1 <-
+  rbind(
+    data %>%
+    filter(Logger == '1'),
+    data %>%
+    filter(Logger == '2') %>%
+    mutate(Temperature = sort(Temperature)))
+
+ggplot(t1, aes(x = Date.Time, y = Temperature, color = Logger)) + 
+  theme_bw() + 
+  geom_line()
+
+t.test(Temperature ~ Logger, data = t1)
+
+rm(t1)
+```
+
+The curves will look very different, while the test returns the _exact_ same result.
+
+The straight forward fix to this is to use the multivariate `HotellingsT2()`.
+Lets see how that works.
+
+# Analysis - Multivariate
+
+When running multivariate tests, the assumptions are normally important.
+However, as the first test is merely a stepping stone, we will be ignore best practice.
+In our case of the `HotellingsT2()` test, there are 4 assumptions.
+
+1. Data is independent
+2. No sub populations
+3. The data is multivariate normal
+4. Both groups have the same variance-covariance matrix
+
+An astute observer will notice that there is clearly auto-correlation.
+If this test were our final step, we would be especially concerned.
+
+The sub population assumptions can safely be ignored for this example.
+None of the data is repeated and the data came from exactly two different devices.
+
+When looking at multivariate normal results, the auto-correlation can be seen in full effect.
+
+```{r}
+mn <- min(data$Date.Time)
+t1 <-
+  data %>%
+  mutate(
+    Minute = difftime(Date.Time, mn, units = "mins"),
+    Minute = as.integer(Minute)) %>%
+  select(Logger, Temperature, Minute) %>%
+  as.data.frame()
+  
+mshapiro.test(t(t1[t1$Logger == '1',c('Temperature', 'Minute')]))
+mshapiro.test(t(t1[t1$Logger == '2',c('Temperature', 'Minute')]))
+
+rm(mn)
+```
+
+Normally, we want to see `mshapiro.test()` $\alpha$ > 0.05, so we can fail to reject $H_0$, and say the there is no evidence to suggest the data is not multivariate normal.
+With our p-value being very small (p < 0.0001), we are forced to say the opposite, there _is_ evidence to suggest the data is not normal.
+While `HotellingsT2()` is known to be robust verses this assumption, it is not _that_ robust.
+
+When looking at the variance-covariance matrix, we find our first "good" assumption.
+
+```{r}
+boxM(t1[,c('Temperature', 'Minute')], t1[,'Logger'])
+```
+
+Even considering the _significant_ departure from normality found above, our p-value is > 0.05, so we can fail to reject $H_0$, and say the there is no evidence to suggest `Logger` 1 and 2 have different matrices.
+
+Given our prior commitment to willful ignorance, we continue on with the test.
+
+```{r}
+g1 = t1[t1$Logger == '1',c('Temperature', 'Minute')]
+g2 = t1[t1$Logger == '2',c('Temperature', 'Minute')]
+HotellingsT2(g1, g2)
+
+rm(t1, g1, g2)
+```
+
+At this point our p-value > 0.05, so we can fail to reject $H_0$, and say the there is no evidence to suggest the data has a different joint group means.
+Let that sink in a minute.
+Even though we went through the process, however questionably sound it may be, of using a multivariate test, we still end up in the same place: no difference even when there is clearly a difference.
+This leads us back to our first issue, we want to test to make sure the distributions are equal, not the group means.
+
+Now that we know that group means is not helping we need to come up with a better plan.
+We need to reset back so similar data and try another approach.
+
+# Analysis - $\chi^2$
+
+One possibility is the `chisq.test()`.
+The first application of the `chisq.test()` that may be found in many texts is differences between a known and an observed distribution.
+This usually comes in the form of comparing [Weldon's dice](https://en.wikipedia.org/wiki/Raphael_Weldon) to the binomial distribution.
+
+The issue for this particular data set is that `chisq.test()` works on count data.
+Our data is definitively not that.
+We can overcome this hurtle by using a bucketing technique.
+
+The main problem with bucketing, is selecting the bucket size.
+For this data set, it is not so bad, but a lot of care needs to be placed here.
+For this data set, `8` buckets will be selected for each of the two variables `Temperature` and `Minute`.
+
+```{r results = 'hold'}
+b <- 8
+mn <- min(data$Date.Time)
+t1 <-
+  data %>%
+  mutate(
+    Minute = difftime(Date.Time, mn, units = "mins"),
+    Minute = as.integer(Minute)) %>%
+  select(Logger, Temperature, Minute) %>%
+  mutate(
+    TBlock = ntile(Temperature, b),
+    MBlock = ntile(Minute, b))
+
+(t1 <- xtabs(~ TBlock + MBlock + Logger, data = t1))
+
+rm(b, mn)
+```
+
+Looking at the two matrices, we see the fatal flaw of $\chi^2$, zero entries.
+This is expected for this data set because we are looking at a multivariate distribution.
+In fact, it is exactly this reason that we care about the _joint_ `Temperature` x `Minute` distribution.
+Sometimes our `Minute` data just doesn't have all the ranges for `Temperature` and we want that to be taken into account.
+
+We can move past the excessive zero entries, by flattening the matrices and removing entries where both are zero.
+
+```{r}
+g1 <- as.vector(t1[,,1])
+g2 <- as.vector(t1[,,2])
+indx <- !(g1 == 0 & g2 == 0)
+g1 <- g1[indx]
+g2 <- g2[indx]
+
+(t1 <-
+  c(g1, g2) %>%
+  matrix(nrow = 2, byrow = T) %>%
+  as.table())
+
+chisq.test(t1, simulate.p.value = T)
+
+rm(t1, g1, g2, indx)
+```
+
+At this point our p-value < 0.05, so we reject $H_0$, and say the there is evidence to suggest the count data differed between the first and second distribution.
+This creates a big problem for us.
+Even comparing two similar curves, our data is still different.
+
+
+
+
+
+
+1. Carefully manage the bucket sizes
+2. Check to see what happens when we resort the data like we did before
+
+Lets try the data re-sorting experiment again to see if `chisq.test()` gets $H_0$ only in cases where we expect.
+
+```{r}
+b <- 8
+t2 <-
+  rbind(
+    t1 %>%
+    filter(Logger == '1'), 
+    t1 %>%
+    filter(Logger == '2') %>%
+    mutate(Temperature = sort(Temperature))) %>%
+  mutate(
+    Date = date(Date.Time),
+    Minute = difftime(Date.Time, Date, units = "mins"),
+    Minute = as.integer(Minute)) %>%
+  select(Logger, Temperature, Minute) %>%
+  mutate(
+    TBlock = ntile(Temperature, b),
+    MBlock = ntile(Minute, b))
+(t2 <- xtabs(~ TBlock + MBlock + Logger, data = t2))
+g1 <- as.vector(t2[,,1])
+g2 <- as.vector(t2[,,2])
+indx <- !(g1 == 0 & g2 == 0)
+g1 <- g1[indx]
+g2 <- g2[indx]
+
+(t2 <-
+  c(g1, g2) %>%
+  matrix(nrow = 2, byrow = T) %>%
+  as.table())
+chisq.test(t2)
+```
+
+
+
+
 
